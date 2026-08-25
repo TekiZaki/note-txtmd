@@ -957,6 +957,9 @@ namespace NoteTxtMd
             Color pressedFill = _isDarkMode ? Color.FromRgb(0x33, 0x33, 0x33) : Color.FromRgb(0xE2, 0xE2, 0xE2);
             Color selectedFill = _isDarkMode ? Color.FromRgb(0xEC, 0xEC, 0xEC) : Color.FromRgb(0x11, 0x11, 0x11);
             Color selectedInk = _isDarkMode ? Color.FromRgb(0x0F, 0x0F, 0x0F) : Color.FromRgb(0xFF, 0xFF, 0xFF);
+            Color scrollThumb = _isDarkMode ? Color.FromRgb(0x4A, 0x4A, 0x4A) : Color.FromRgb(0xB8, 0xB8, 0xB8);
+            Color scrollThumbHover = _isDarkMode ? Color.FromRgb(0x6A, 0x6A, 0x6A) : Color.FromRgb(0x8E, 0x8E, 0x8E);
+            Color scrollThumbPressed = _isDarkMode ? Color.FromRgb(0x8A, 0x8A, 0x8A) : Color.FromRgb(0x6E, 0x6E, 0x6E);
 
             Application.Current.Resources["CanvasBrush"] = new SolidColorBrush(canvasColor);
             Application.Current.Resources["SurfaceBrush"] = new SolidColorBrush(surfaceColor);
@@ -969,6 +972,10 @@ namespace NoteTxtMd
             Application.Current.Resources["PressedFillBrush"] = new SolidColorBrush(pressedFill);
             Application.Current.Resources["SelectedFillBrush"] = new SolidColorBrush(selectedFill);
             Application.Current.Resources["SelectedInkBrush"] = new SolidColorBrush(selectedInk);
+            Application.Current.Resources["ScrollBarThumbBrush"] = new SolidColorBrush(scrollThumb);
+            Application.Current.Resources["ScrollBarThumbHoverBrush"] = new SolidColorBrush(scrollThumbHover);
+            Application.Current.Resources["ScrollBarThumbPressedBrush"] = new SolidColorBrush(scrollThumbPressed);
+            Application.Current.Resources["ScrollBarTrackBrush"] = new SolidColorBrush(Colors.Transparent);
         }
 
         #endregion

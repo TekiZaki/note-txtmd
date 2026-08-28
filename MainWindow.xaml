@@ -250,7 +250,8 @@
                               Padding="4"
                               Foreground="{DynamicResource PrimaryInkBrush}"
                               SelectedItemChanged="TreeFiles_SelectedItemChanged"
-                              MouseDoubleClick="TreeFiles_MouseDoubleClick">
+                              MouseDoubleClick="TreeFiles_MouseDoubleClick"
+                              ContextMenuOpening="TreeFiles_ContextMenuOpening">
                         <TreeView.ItemContainerStyle>
                             <Style TargetType="TreeViewItem">
                                 <Setter Property="FontSize" Value="12" />
@@ -259,6 +260,7 @@
                                 <Setter Property="Padding" Value="4,3" />
                                 <Setter Property="Cursor" Value="Hand" />
                                 <EventSetter Event="PreviewMouseRightButtonDown" Handler="TreeViewItem_PreviewMouseRightButtonDown" />
+                                <EventSetter Event="Expanded" Handler="TreeViewItem_Expanded" />
                             </Style>
                         </TreeView.ItemContainerStyle>
                     </TreeView>

@@ -15,6 +15,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -83,19 +84,6 @@ namespace NoteTxtMd
             ApplyZoom();
             UpdateContextMenuButtonLabel();
 
-            ContextMenu bgMenu = new ContextMenu();
-            MenuItem bgNewFileItem = new MenuItem();
-            bgNewFileItem.Header = "New File...";
-            bgNewFileItem.Click += delegate(object s, RoutedEventArgs ev)
-            {
-                if (!string.IsNullOrEmpty(_currentFolderPath) && Directory.Exists(_currentFolderPath))
-                {
-                    SidebarNewFile(_currentFolderPath, true);
-                }
-            };
-            bgMenu.Items.Add(bgNewFileItem);
-            TreeFiles.ContextMenu = bgMenu;
-
             string targetFileToOpen = null;
             string targetFolderToOpen = null;
 
@@ -110,19 +98,6 @@ namespace NoteTxtMd
                 {
                     targetFileToOpen = Path.GetFullPath(firstArg);
                     targetFolderToOpen = Path.GetDirectoryName(targetFileToOpen);
-                }
-            }
-
-            if (!string.IsNullOrEmpty(targetFolderToOpen))
-            {
-                LoadFolder(targetFolderToOpen);
-            }
-            else
-            {
-                string cwd = Directory.GetCurrentDirectory();
-                if (Directory.Exists(cwd))
-                {
-                    LoadFolder(cwd);
                 }
             }
 
@@ -162,6 +137,25 @@ namespace NoteTxtMd
                     + "| `Ctrl + +/-/0` | Synchronized Zoom In / Out / Reset |\r\n";
 
                 CreateNewTab(null, sampleMarkdown, false);
+            }
+
+            // Defer folder scan so UI chrome and editor paint immediately
+            string folderToLoad = targetFolderToOpen;
+            if (string.IsNullOrEmpty(folderToLoad))
+            {
+                string cwd = Directory.GetCurrentDirectory();
+                if (Directory.Exists(cwd))
+                {
+                    folderToLoad = cwd;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(folderToLoad))
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate()
+                {
+                    LoadFolder(folderToLoad);
+                }));
             }
         }
 
@@ -221,65 +215,106 @@ namespace NoteTxtMd
             PopulateFileTree(TxtSearchFilter != null ? TxtSearchFilter.Text : string.Empty);
         }
 
+        private static readonly HashSet<string> IgnoredFolderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".git", "node_modules", "bin", "obj", ".vs", "recycle-bin",
+            ".idea", ".vscode", "dist", "build", "packages", ".nuget", ".svn", ".hg", "target"
+        };
+
+        private class FileSystemNodeData
+        {
+            public string FullPath { get; set; }
+            public string Name { get; set; }
+            public bool IsDirectory { get; set; }
+            public bool HasChildren { get; set; }
+            public List<FileSystemNodeData> Children { get; set; }
+        }
+
+        private int _populateToken = 0;
+
         private void PopulateFileTree(string filter)
         {
             if (TreeFiles == null || string.IsNullOrEmpty(_currentFolderPath) || !Directory.Exists(_currentFolderPath))
                 return;
 
-            TreeFiles.Items.Clear();
+            int token = ++_populateToken;
+            string targetFolder = _currentFolderPath;
+            bool isFilterMode = !string.IsNullOrWhiteSpace(filter);
 
-            try
+            Task.Run(new Func<List<FileSystemNodeData>>(delegate()
             {
-                DirectoryInfo rootDir = new DirectoryInfo(_currentFolderPath);
-                bool hasAny = PopulateFolderItems(TreeFiles.Items, rootDir, filter, true);
-
-                if (!hasAny)
+                if (isFilterMode)
                 {
-                    TreeViewItem emptyItem = new TreeViewItem();
-                    emptyItem.Header = "(No .txt or .md files found)";
-                    emptyItem.Foreground = (Brush)Application.Current.Resources["SecondaryInkBrush"];
-                    emptyItem.FontStyle = FontStyles.Italic;
-                    TreeFiles.Items.Add(emptyItem);
+                    return ScanDirectoryFiltered(targetFolder, filter);
                 }
-            }
-            catch (Exception ex)
+                else
+                {
+                    return ScanDirectoryImmediate(targetFolder);
+                }
+            })).ContinueWith(new Action<Task<List<FileSystemNodeData>>>(delegate(Task<List<FileSystemNodeData>> t)
             {
-                Debug.WriteLine("Error populating file tree: " + ex.Message);
-            }
+                if (t.IsCompleted && !t.IsFaulted && token == _populateToken)
+                {
+                    List<FileSystemNodeData> nodes = t.Result;
+                    Dispatcher.Invoke(new Action(delegate()
+                    {
+                        if (token != _populateToken)
+                            return;
+
+                        TreeFiles.Items.Clear();
+
+                        if (nodes != null && nodes.Count > 0)
+                        {
+                            foreach (FileSystemNodeData nodeData in nodes)
+                            {
+                                TreeFiles.Items.Add(CreateFileTreeNode(nodeData, isFilterMode));
+                            }
+                        }
+                        else
+                        {
+                            TreeViewItem emptyItem = new TreeViewItem();
+                            emptyItem.Header = isFilterMode ? "(No matching files)" : "(No .txt or .md files found)";
+                            emptyItem.Foreground = (Brush)Application.Current.Resources["SecondaryInkBrush"];
+                            emptyItem.FontStyle = FontStyles.Italic;
+                            TreeFiles.Items.Add(emptyItem);
+                        }
+                    }));
+                }
+            }));
         }
 
-        private bool PopulateFolderItems(ItemCollection targetCollection, DirectoryInfo dirInfo, string filter, bool isRoot)
+        private static List<FileSystemNodeData> ScanDirectoryImmediate(string dirPath)
         {
-            bool hasMatchingContent = false;
-            string lowerFilter = string.IsNullOrEmpty(filter) ? string.Empty : filter.Trim().ToLowerInvariant();
+            List<FileSystemNodeData> results = new List<FileSystemNodeData>();
+            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
+                return results;
 
             try
             {
-                // Subdirectories
+                DirectoryInfo dirInfo = new DirectoryInfo(dirPath);
+
+                // Subdirectories (skip hidden, dot-prefixed, or heavy irrelevant folders)
                 DirectoryInfo[] subDirs = dirInfo.GetDirectories();
                 Array.Sort(subDirs, delegate(DirectoryInfo a, DirectoryInfo b) { return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); });
 
                 foreach (DirectoryInfo subDir in subDirs)
                 {
-                    if ((subDir.Attributes & FileAttributes.Hidden) != 0 || subDir.Name.StartsWith("."))
+                    if ((subDir.Attributes & FileAttributes.Hidden) != 0 || subDir.Name.StartsWith(".") || IgnoredFolderNames.Contains(subDir.Name))
                         continue;
 
-                    TreeViewItem subDirNode = new TreeViewItem();
-                    subDirNode.Header = "📁 " + subDir.Name;
-                    subDirNode.Tag = subDir.FullName;
-                    subDirNode.FontWeight = FontWeights.Medium;
-                    subDirNode.ContextMenu = CreateSidebarContextMenu(subDir.FullName, true);
-
-                    bool subHasMatch = PopulateFolderItems(subDirNode.Items, subDir, filter, false);
-                    if (subHasMatch)
+                    bool hasChildren = CheckDirectoryHasContent(subDir);
+                    if (hasChildren)
                     {
-                        subDirNode.IsExpanded = !string.IsNullOrEmpty(lowerFilter);
-                        targetCollection.Add(subDirNode);
-                        hasMatchingContent = true;
+                        FileSystemNodeData node = new FileSystemNodeData();
+                        node.FullPath = subDir.FullName;
+                        node.Name = subDir.Name;
+                        node.IsDirectory = true;
+                        node.HasChildren = true;
+                        results.Add(node);
                     }
                 }
 
-                // Files (.txt, .md, .markdown)
+                // Files (.txt, .md, .markdown, .mdown)
                 FileInfo[] files = dirInfo.GetFiles();
                 Array.Sort(files, delegate(FileInfo a, FileInfo b) { return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); });
 
@@ -291,25 +326,230 @@ namespace NoteTxtMd
                     string ext = file.Extension.ToLowerInvariant();
                     if (ext == ".txt" || ext == ".md" || ext == ".markdown" || ext == ".mdown")
                     {
-                        if (string.IsNullOrEmpty(lowerFilter) || file.Name.ToLowerInvariant().Contains(lowerFilter))
+                        FileSystemNodeData node = new FileSystemNodeData();
+                        node.FullPath = file.FullName;
+                        node.Name = file.Name;
+                        node.IsDirectory = false;
+                        node.HasChildren = false;
+                        results.Add(node);
+                    }
+                }
+            }
+            catch { }
+
+            return results;
+        }
+
+        private static bool CheckDirectoryHasContent(DirectoryInfo dirInfo)
+        {
+            try
+            {
+                DirectoryInfo[] subDirs = dirInfo.GetDirectories();
+                foreach (DirectoryInfo subDir in subDirs)
+                {
+                    if ((subDir.Attributes & FileAttributes.Hidden) == 0 && !subDir.Name.StartsWith(".") && !IgnoredFolderNames.Contains(subDir.Name))
+                        return true;
+                }
+
+                FileInfo[] files = dirInfo.GetFiles();
+                foreach (FileInfo file in files)
+                {
+                    if ((file.Attributes & FileAttributes.Hidden) == 0)
+                    {
+                        string ext = file.Extension.ToLowerInvariant();
+                        if (ext == ".txt" || ext == ".md" || ext == ".markdown" || ext == ".mdown")
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static List<FileSystemNodeData> ScanDirectoryFiltered(string dirPath, string filter)
+        {
+            List<FileSystemNodeData> results = new List<FileSystemNodeData>();
+            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
+                return results;
+
+            string lowerFilter = filter.Trim().ToLowerInvariant();
+
+            try
+            {
+                DirectoryInfo dirInfo = new DirectoryInfo(dirPath);
+
+                // Subdirectories
+                DirectoryInfo[] subDirs = dirInfo.GetDirectories();
+                Array.Sort(subDirs, delegate(DirectoryInfo a, DirectoryInfo b) { return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); });
+
+                foreach (DirectoryInfo subDir in subDirs)
+                {
+                    if ((subDir.Attributes & FileAttributes.Hidden) != 0 || subDir.Name.StartsWith(".") || IgnoredFolderNames.Contains(subDir.Name))
+                        continue;
+
+                    List<FileSystemNodeData> childResults = ScanDirectoryFiltered(subDir.FullName, filter);
+                    bool folderMatches = subDir.Name.ToLowerInvariant().Contains(lowerFilter);
+
+                    if (folderMatches || childResults.Count > 0)
+                    {
+                        FileSystemNodeData node = new FileSystemNodeData();
+                        node.FullPath = subDir.FullName;
+                        node.Name = subDir.Name;
+                        node.IsDirectory = true;
+                        node.HasChildren = childResults.Count > 0;
+                        node.Children = childResults;
+                        results.Add(node);
+                    }
+                }
+
+                // Files
+                FileInfo[] files = dirInfo.GetFiles();
+                Array.Sort(files, delegate(FileInfo a, FileInfo b) { return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); });
+
+                foreach (FileInfo file in files)
+                {
+                    if ((file.Attributes & FileAttributes.Hidden) != 0)
+                        continue;
+
+                    string ext = file.Extension.ToLowerInvariant();
+                    if (ext == ".txt" || ext == ".md" || ext == ".markdown" || ext == ".mdown")
+                    {
+                        if (file.Name.ToLowerInvariant().Contains(lowerFilter))
                         {
-                            TreeViewItem fileNode = new TreeViewItem();
-                            string icon = (ext == ".txt") ? "📄 " : "📝 ";
-                            fileNode.Header = icon + file.Name;
-                            fileNode.Tag = file.FullName;
-                            fileNode.FontWeight = FontWeights.Normal;
-                            fileNode.ContextMenu = CreateSidebarContextMenu(file.FullName, false);
-                            targetCollection.Add(fileNode);
-                            hasMatchingContent = true;
+                            FileSystemNodeData node = new FileSystemNodeData();
+                            node.FullPath = file.FullName;
+                            node.Name = file.Name;
+                            node.IsDirectory = false;
+                            node.HasChildren = false;
+                            results.Add(node);
                         }
                     }
                 }
             }
-            catch
-            {
-            }
+            catch { }
 
-            return hasMatchingContent;
+            return results;
+        }
+
+        private static TreeViewItem CreateFileTreeNode(FileSystemNodeData data, bool isFilterMode)
+        {
+            TreeViewItem item = new TreeViewItem();
+            if (data.IsDirectory)
+            {
+                item.Header = "📁 " + data.Name;
+                item.Tag = data.FullPath;
+                item.FontWeight = FontWeights.Medium;
+
+                if (isFilterMode && data.Children != null && data.Children.Count > 0)
+                {
+                    item.IsExpanded = true;
+                    foreach (FileSystemNodeData childData in data.Children)
+                    {
+                        item.Items.Add(CreateFileTreeNode(childData, true));
+                    }
+                }
+                else if (data.HasChildren)
+                {
+                    TreeViewItem dummy = new TreeViewItem();
+                    dummy.Header = string.Empty;
+                    dummy.Tag = "__DUMMY__";
+                    item.Items.Add(dummy);
+                }
+            }
+            else
+            {
+                string ext = Path.GetExtension(data.Name).ToLowerInvariant();
+                string icon = (ext == ".txt") ? "📄 " : "📝 ";
+                item.Header = icon + data.Name;
+                item.Tag = data.FullPath;
+                item.FontWeight = FontWeights.Normal;
+            }
+            return item;
+        }
+
+        private void TreeViewItem_Expanded(object sender, RoutedEventArgs e)
+        {
+            TreeViewItem item = sender as TreeViewItem;
+            if (item == null || item.Tag == null)
+                return;
+
+            if (item.Items.Count == 1)
+            {
+                TreeViewItem child = item.Items[0] as TreeViewItem;
+                if (child != null && (string)child.Tag == "__DUMMY__")
+                {
+                    string dirPath = item.Tag.ToString();
+                    Task.Run(new Func<List<FileSystemNodeData>>(delegate()
+                    {
+                        return ScanDirectoryImmediate(dirPath);
+                    })).ContinueWith(new Action<Task<List<FileSystemNodeData>>>(delegate(Task<List<FileSystemNodeData>> t)
+                    {
+                        if (t.IsCompleted && !t.IsFaulted)
+                        {
+                            List<FileSystemNodeData> nodes = t.Result;
+                            Dispatcher.Invoke(new Action(delegate()
+                            {
+                                item.Items.Clear();
+                                if (nodes != null && nodes.Count > 0)
+                                {
+                                    foreach (FileSystemNodeData nodeData in nodes)
+                                    {
+                                        item.Items.Add(CreateFileTreeNode(nodeData, false));
+                                    }
+                                }
+                                else
+                                {
+                                    TreeViewItem empty = new TreeViewItem();
+                                    empty.Header = "(Empty)";
+                                    empty.Foreground = (Brush)Application.Current.Resources["SecondaryInkBrush"];
+                                    empty.FontStyle = FontStyles.Italic;
+                                    item.Items.Add(empty);
+                                }
+                            }));
+                        }
+                    }));
+                    e.Handled = true;
+                }
+            }
+        }
+
+        private void TreeFiles_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+        {
+            DependencyObject source = e.OriginalSource as DependencyObject;
+            TreeViewItem item = FindVisualParent<TreeViewItem>(source);
+
+            if (item != null && item.Tag != null && (string)item.Tag != "__DUMMY__")
+            {
+                item.Focus();
+                item.IsSelected = true;
+                string targetPath = item.Tag.ToString();
+                bool isDirectory = Directory.Exists(targetPath);
+                TreeFiles.ContextMenu = CreateSidebarContextMenu(targetPath, isDirectory);
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(_currentFolderPath) && Directory.Exists(_currentFolderPath))
+                {
+                    TreeFiles.ContextMenu = CreateSidebarContextMenu(_currentFolderPath, true);
+                }
+                else
+                {
+                    e.Handled = true;
+                }
+            }
+        }
+
+        private static T FindVisualParent<T>(DependencyObject child) where T : DependencyObject
+        {
+            while (child != null)
+            {
+                if (child is T)
+                {
+                    return (T)child;
+                }
+                child = VisualTreeHelper.GetParent(child);
+            }
+            return null;
         }
 
         private ContextMenu CreateSidebarContextMenu(string targetPath, bool isDirectory)
